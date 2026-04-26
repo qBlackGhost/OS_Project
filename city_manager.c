@@ -55,6 +55,9 @@ typedef char _assert_report_size[ (sizeof(Report) == 208) ? 1 : -1 ];
 #define PERM_CFG       0640   /* rw-r----- */
 #define PERM_LOG       0644   /* rw-r--r-- */
 
+/* Forward declaration – defined after cmd_filter */
+void check_symlink(const char *district);
+
 /* ─────────────────────────────────────────────
  * HELPER: convert permission bits → "rwxrwxrwx" string
  * You must write this yourself per the spec.
@@ -98,24 +101,42 @@ int check_permissions(const char *path, mode_t expected) {
 /* ─────────────────────────────────────────────
  * HELPER: log an action to logged_district
  * Format: "<timestamp>\t<user>\t<role>\t<action>\n"
- * Only the manager role may write (permission 644 means
- * owner-write only; we enforce this here by role check).
+ *
+ * logged_district has mode 644: owner (manager) may write,
+ * group/other may only read.  Per spec we check the permission
+ * bits with stat() and refuse if the declared role would not
+ * have write access under the scheme (only owner-write bit set).
  * ───────────────────────────────────────────── */
 void log_action(const char *district, const char *user,
                 const char *role, const char *action) {
     char path[256];
     snprintf(path, sizeof(path), "%s/logged_district", district);
 
-    /* Per spec: only manager (owner) may write to the log */
-    if (strcmp(role, ROLE_INSPECTOR) == 0) {
-        fprintf(stderr,
-            "WARNING: inspector role cannot write to log – skipping\n");
-        return;
-    }
-
+    /* Create file if it does not exist yet */
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, PERM_LOG);
     if (fd < 0) { perror("log open"); return; }
+    close(fd);
     chmod(path, PERM_LOG);
+
+    /* Check permission bits with stat() as required by spec.
+     * logged_district is 644: only owner-write (S_IWUSR) is set.
+     * Inspectors map to the group role → no write bit → refuse. */
+    struct stat st;
+    if (stat(path, &st) < 0) { perror("log stat"); return; }
+
+    if (strcmp(role, ROLE_INSPECTOR) == 0) {
+        /* Group-write bit NOT set on 644 → inspector cannot write */
+        if (!(st.st_mode & S_IWGRP)) {
+            fprintf(stderr,
+                "ERROR: permission denied – inspector role cannot write "
+                "to logged_district (mode %o lacks group-write)\n",
+                (unsigned)(st.st_mode & 0777));
+            return;
+        }
+    }
+
+    fd = open(path, O_WRONLY | O_APPEND);
+    if (fd < 0) { perror("log open"); return; }
 
     time_t now = time(NULL);
     char buf[512];
@@ -174,6 +195,9 @@ void ensure_district(const char *district) {
             perror("symlink");
         }
     }
+
+    /* Always verify the symlink is not dangling */
+    check_symlink(district);
 }
 
 /* ─────────────────────────────────────────────
@@ -267,15 +291,27 @@ void print_report(const Report *r) {
 /* ─────────────────────────────────────────────
  * COMMAND: list
  * Both roles. Prints permission bits, size, mtime of reports.dat.
+ * Uses lstat() on reports.dat so a symlink is identified as such,
+ * not silently followed (spec requirement).
  * ───────────────────────────────────────────── */
 void cmd_list(const char *district) {
     char rpt_path[256];
     snprintf(rpt_path, sizeof(rpt_path), "%s/reports.dat", district);
 
     struct stat st;
-    if (stat(rpt_path, &st) < 0) {
+    /* lstat: if reports.dat is itself a symlink, we see the link, not the target */
+    if (lstat(rpt_path, &st) < 0) {
         fprintf(stderr, "ERROR: district '%s' not found or no reports.dat\n", district);
         exit(1);
+    }
+
+    /* If it is a symlink, warn and follow to get real size */
+    if (S_ISLNK(st.st_mode)) {
+        fprintf(stderr, "WARNING: reports.dat is a symlink – following to read\n");
+        if (stat(rpt_path, &st) < 0) {
+            fprintf(stderr, "ERROR: dangling symlink for reports.dat\n");
+            exit(1);
+        }
     }
 
     /* Permission string */
@@ -317,6 +353,13 @@ void cmd_list(const char *district) {
 void cmd_view(const char *district, int report_id) {
     char rpt_path[256];
     snprintf(rpt_path, sizeof(rpt_path), "%s/reports.dat", district);
+
+    struct stat st;
+    if (lstat(rpt_path, &st) < 0) {
+        fprintf(stderr, "ERROR: district '%s' does not exist or has no reports.dat\n",
+                district);
+        exit(1);
+    }
 
     int fd = open(rpt_path, O_RDONLY);
     if (fd < 0) { perror("open"); exit(1); }
@@ -508,6 +551,13 @@ int match_condition(Report *r, const char *field, const char *op, const char *va
 void cmd_filter(const char *district, char **conditions, int num_conditions) {
     char rpt_path[256];
     snprintf(rpt_path, sizeof(rpt_path), "%s/reports.dat", district);
+
+    struct stat st;
+    if (lstat(rpt_path, &st) < 0) {
+        fprintf(stderr, "ERROR: district '%s' does not exist or has no reports.dat\n",
+                district);
+        exit(1);
+    }
 
     int fd = open(rpt_path, O_RDONLY);
     if (fd < 0) { perror("open"); exit(1); }
