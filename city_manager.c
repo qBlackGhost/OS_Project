@@ -8,6 +8,10 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096  // Common value for Linux and macOS
+#endif
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -695,6 +699,58 @@ int main(int argc, char *argv[]) {
         }
         cmd_update_threshold(pos[0], role, atoi(pos[1]), user);
 
+    } else if (strcmp(cmd, "remove_district") == 0) {
+        if (role != ROLE_MANAGER) {
+            fprintf(stderr, "ERROR: Only managers can remove districts.\n");
+            return 1;
+        }
+        if (npos < 1) {
+            fprintf(stderr, "Usage: --remove_district <district_id>\n");
+            return 1;
+        }
+
+        const char *district_id = pos[0];
+        char district_dir[PATH_MAX];
+        char symlink_path[PATH_MAX];
+
+        // Construct the district directory path
+        snprintf(district_dir, sizeof(district_dir), "/path/to/districts/%s", district_id);
+        snprintf(symlink_path, sizeof(symlink_path), "/path/to/active_reports-%s", district_id);
+
+        // Validate the district directory path
+        if (access(district_dir, F_OK) != 0) {
+            fprintf(stderr, "ERROR: District directory '%s' does not exist.\n", district_dir);
+            return 1;
+        }
+
+        // Remove the district directory and symlink
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child process
+            execlp("rm", "rm", "-rf", district_dir, NULL);
+            // If execlp fails
+            perror("ERROR: Failed to execute rm");
+            exit(1);
+        } else if (pid > 0) {
+            // Parent process
+            int status;
+            waitpid(pid, &status, 0);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                // Remove the symlink
+                if (unlink(symlink_path) != 0) {
+                    perror("ERROR: Failed to remove symlink");
+                    return 1;
+                }
+                printf("District '%s' and its contents were successfully removed.\n", district_id);
+            } else {
+                fprintf(stderr, "ERROR: Failed to remove district directory '%s'.\n", district_dir);
+                return 1;
+            }
+        } else {
+            // Fork failed
+            perror("ERROR: Failed to fork process");
+            return 1;
+        }
     } else if (strcmp(cmd, "filter") == 0) {
         if (npos < 2) {
             fprintf(stderr,
