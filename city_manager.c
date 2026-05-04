@@ -4,6 +4,15 @@
  *
  * Build: gcc city_manager.c -o city_manager
  * Usage: ./city_manager --role <manager|inspector> --user <name> --<command> [args...]
+ *
+ * Commands:
+ *   --add <district>                     Add a new report to the district.
+ *   --list <district>                    List all reports in the district.
+ *   --view <district> <id>               View a specific report by ID.
+ *   --remove_report <district> <id>      Remove a report by ID (manager only).
+ *   --update_threshold <district> <value> Update severity threshold (manager only).
+ *   --filter <district> <field:op:value> Filter reports based on conditions.
+ *   --remove_district <district_id>      Remove a district and its contents (manager only).
  */
 
 #include <stdio.h>
@@ -19,6 +28,10 @@
 #include <sys/types.h>
 #include <time.h>
 #include <errno.h>
+
+#include <signal.h>
+
+#define MONITOR_PID_FILE "./.monitor_pid"
 
 /* ─────────────────────────────────────────────
  * REPORT STRUCT  –  must be exactly 208 bytes
@@ -463,9 +476,56 @@ void cmd_update_threshold(const char *district, const char *role,
     int len = snprintf(buf, sizeof(buf), "threshold=%d\n", value);
     write(fd, buf, len);
     close(fd);
+}
 
-    printf("Threshold updated to %d in district '%s'.\n", value, district);
-    log_action(district, user, role, "update_threshold");
+/* ─────────────────────────────────────────────
+ * HELPER: Notify monitor of a new report
+ * ───────────────────────────────────────────── */
+void add_report(const char *report_id, const char *log_file_path) {
+    FILE *pid_file;
+    pid_t monitor_pid;
+    FILE *log_file;
+
+    // Open the .monitor_pid file to read the monitor's PID
+    pid_file = fopen(MONITOR_PID_FILE, "r");
+    if (pid_file == NULL) {
+        perror("ERROR: Could not open .monitor_pid file");
+        goto log_error;
+    }
+
+    // Read the PID from the file
+    if (fscanf(pid_file, "%d", &monitor_pid) != 1) {
+        fprintf(stderr, "ERROR: Failed to read PID from .monitor_pid file\n");
+        fclose(pid_file);
+        goto log_error;
+    }
+    fclose(pid_file);
+
+    // Send SIGUSR1 to the monitor program
+    if (kill(monitor_pid, SIGUSR1) == -1) {
+        fprintf(stderr, "ERROR: Failed to send SIGUSR1 to monitor (PID: %d): %s\n", monitor_pid, strerror(errno));
+        goto log_error;
+    }
+
+    // Log success message
+    log_file = fopen(log_file_path, "a");
+    if (log_file == NULL) {
+        perror("ERROR: Could not open log file");
+        return;
+    }
+    fprintf(log_file, "Report %s: Monitor notified successfully (PID: %d).\n", report_id, monitor_pid);
+    fclose(log_file);
+    return;
+
+log_error:
+    // Log error message
+    log_file = fopen(log_file_path, "a");
+    if (log_file == NULL) {
+        perror("ERROR: Could not open log file");
+        return;
+    }
+    fprintf(log_file, "Report %s: Monitor could not be notified of the event.\n", report_id);
+    fclose(log_file);
 }
 
 /* ─────────────────────────────────────────────
@@ -473,7 +533,7 @@ void cmd_update_threshold(const char *district, const char *role,
  *
  * These two functions were generated with AI assistance.
  * See ai_usage.md for prompts, output, and changes made.
- * ───────────────────────────────────────────── */
+ * ───────────────────────────────────────────── */ 
 
 /*
  * parse_condition – split "field:op:value" into three parts.
